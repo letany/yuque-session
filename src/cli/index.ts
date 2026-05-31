@@ -4,20 +4,22 @@ import { login as doLogin } from "../auth/login.js";
 import { getSession, clearSession, isExpired } from "../auth/session.js";
 import * as api from "../api/client.js";
 
-function parseUrl(url: string): { namespace: string; slug?: string } {
+function parseUrl(url: string): { bookId?: number; slug?: string } {
+  // Match Yuque URL pattern: https://www.yuque.com/{login}/{repo_slug}/{doc_slug}
+  // or https://www.yuque.com/{login}/{repo_slug}
+  // Contains no book ID from URL, so we use alternative methods
   const match = url.match(
-    /https?:\/\/(?:www\.)?yuque\.com\/([^/]+\/[^/]+)(?:\/([^/?#]+))?/
+    /https?:\/\/(?:www\.)?yuque\.com\/([^/]+)\/([^/]+)(?:\/([^/?#]+))?/
   );
   if (match) {
-    return { namespace: match[1], slug: match[2] };
+    return { slug: match[3] || match[2] };
   }
+  // Try to parse as bookId/docSlug
   if (url.includes("/")) {
     const parts = url.split("/");
-    if (parts.length >= 2) {
-      return { namespace: url, slug: undefined };
-    }
+    return { bookId: parseInt(parts[0]), slug: parts[1] };
   }
-  return { namespace: url, slug: undefined };
+  return { bookId: parseInt(url) || undefined };
 }
 
 const program = new Command();
@@ -50,11 +52,11 @@ program
   .action(() => {
     const session = getSession();
     if (!session) {
-      console.log("未登录。请执行 yuque login");
+      console.log("未登录，请执行 yuque login");
       return;
     }
     if (isExpired(session)) {
-      console.log("会话已过期。请重新执行 yuque login");
+      console.log("会话已过期，请重新执行 yuque login");
       return;
     }
     if (session.user) {
@@ -62,21 +64,47 @@ program
     } else {
       console.log("已登录 (会话有效)");
     }
-    console.log(`Cookie 路径: ${process.env.HOME}/.config/yuque-session/cookies.json`);
+    console.log(`Cookie 路径: ~/.config/yuque-session/cookies.json`);
+    console.log(`有效期至: ${new Date(session.expiresAt).toLocaleString()}`);
   });
 
 program
   .command("ls")
-  .description("列出所有知识库")
-  .action(async () => {
+  .argument("[groupId]", "群组/团队 ID（不填则列出个人的）")
+  .description("列出知识库")
+  .action(async (groupId?: string) => {
     try {
-      const repos = await api.listRepos();
-      if (repos.length === 0) {
+      const session = getSession();
+      if (!session) {
+        console.error("请先登录: yuque login");
+        process.exit(1);
+      }
+
+      let books: api.YuqueBook[];
+
+      if (groupId) {
+        books = await api.getBooksByGroup(Number(groupId));
+      } else if (session.user?.id) {
+        // Try groups first, then personal
+        books = await api.getBooksByGroup(session.user.id);
+        if (books.length === 0) {
+          books = await api.getBooksByUser(session.user.id);
+        }
+      } else {
+        console.error("无法确定用户信息，请重新登录");
+        process.exit(1);
+      }
+
+      if (books.length === 0) {
         console.log("暂无知识库。");
         return;
       }
-      for (const r of repos) {
-        console.log(`${r.name}  (${r.namespace})  [${r.items_count} 篇]`);
+
+      for (const b of books) {
+        const stackInfo = b.stack_name ? ` [${b.stack_name}]` : "";
+        console.log(
+          `${b.name}  (id: ${b.id})${stackInfo}`
+        );
       }
     } catch (err) {
       console.error("获取知识库列表失败:", (err as Error).message);
@@ -86,22 +114,18 @@ program
 
 program
   .command("list")
-  .argument("<namespace>", "知识库 namespace，如 login/repo-slug")
+  .argument("<bookId>", "知识库 ID")
   .description("列出知识库内文档")
-  .action(async (namespace: string) => {
+  .action(async (bookId: string) => {
     try {
-      const toc = await api.getToc(namespace);
-      function printItems(items: typeof toc, depth = 0) {
-        for (const item of items) {
-          const prefix = "  ".repeat(depth);
-          const icon = item.type === "DOCUMENT" ? "📄" : "📁";
-          console.log(`${prefix}${icon} ${item.title} (${item.slug})`);
-          if (item.child && item.child.length > 0) {
-            printItems(item.child, depth + 1);
-          }
-        }
+      const docs = await api.listDocs(Number(bookId));
+      if (docs.length === 0) {
+        console.log("暂无文档。");
+        return;
       }
-      printItems(toc);
+      for (const d of docs) {
+        console.log(`${d.title} (slug: ${d.slug}, id: ${d.id})`);
+      }
     } catch (err) {
       console.error("获取文档列表失败:", (err as Error).message);
       process.exit(1);
@@ -110,21 +134,27 @@ program
 
 program
   .command("get")
-  .argument("<url>", "文档 URL 或 namespace/slug")
+  .argument("<slug>", "文档 slug")
+  .option("-b, --book-id <id>", "知识库 ID", String)
   .description("获取文档内容")
-  .action(async (url: string) => {
+  .action(async (slug: string, options: { bookId?: string }) => {
     try {
-      const { namespace, slug } = parseUrl(url);
-      if (!slug) {
-        console.error("请提供完整的文档路径: namespace/slug");
+      if (!options.bookId) {
+        console.error("请指定知识库 ID: --book-id <id>");
         process.exit(1);
       }
-      const doc = await api.getDoc(namespace, slug);
+      const doc = await api.getDoc(slug, Number(options.bookId));
       console.log(`标题: ${doc.title}`);
-      console.log(`描述: ${doc.description}`);
       console.log(`更新: ${doc.content_updated_at}`);
+      console.log(`字数: ${doc.word_count}`);
       console.log("---");
-      console.log(doc.body_html || doc.body);
+      // Try to show content - could be lake format or HTML
+      const content = doc.content || doc.body_html || "";
+      if (content.length > 2000) {
+        console.log(content.substring(0, 2000) + "\n... (内容过长，已截断)");
+      } else {
+        console.log(content);
+      }
     } catch (err) {
       console.error("获取文档失败:", (err as Error).message);
       process.exit(1);
@@ -133,59 +163,68 @@ program
 
 program
   .command("export")
-  .argument("<url>", "文档 URL 或 namespace/slug")
-  .description("导出文档为 Markdown")
+  .argument("<slug>", "文档 slug")
+  .option("-b, --book-id <id>", "知识库 ID", String)
   .option("-o, --output <path>", "输出文件路径")
-  .action(async (url: string, options: { output?: string }) => {
-    try {
-      const { namespace, slug } = parseUrl(url);
-      if (!slug) {
-        console.error("请提供完整的文档路径: namespace/slug");
+  .description("导出文档内容")
+  .action(
+    async (slug: string, options: { bookId?: string; output?: string }) => {
+      try {
+        if (!options.bookId) {
+          console.error("请指定知识库 ID: --book-id <id>");
+          process.exit(1);
+        }
+        const content = await api.getDocContent(slug, Number(options.bookId));
+
+        let outputPath = options.output;
+        if (!outputPath) {
+          const { join } = await import("node:path");
+          const { existsSync, mkdirSync } = await import("node:fs");
+          const dir = join(process.cwd(), "yuque-export");
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          outputPath = join(dir, `${slug}.html`);
+        }
+
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(outputPath, content, "utf-8");
+        console.log(`已导出: ${outputPath}`);
+      } catch (err) {
+        console.error("导出失败:", (err as Error).message);
         process.exit(1);
       }
-
-      let outputPath = options.output;
-      if (!outputPath) {
-        const { writeFileSync, existsSync, mkdirSync } = await import("node:fs");
-        const { join } = await import("node:path");
-        const dir = join(process.cwd(), "yuque-export");
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        outputPath = join(dir, `${slug}.md`);
-      }
-
-      const markdown = await api.getDocRaw(namespace, slug);
-      const { writeFileSync } = await import("node:fs");
-      writeFileSync(outputPath, markdown, "utf-8");
-      console.log(`已导出: ${outputPath}`);
-    } catch (err) {
-      console.error("导出失败:", (err as Error).message);
-      process.exit(1);
     }
-  });
+  );
 
 program
   .command("create")
-  .argument("<namespace>", "知识库 namespace，如 login/repo-slug")
+  .argument("<bookId>", "知识库 ID")
   .argument("<title>", "文档标题")
-  .option("-b, --body <body>", "文档内容 (Markdown)")
+  .option("-b, --body <body>", "文档内容")
   .option("-f, --file <path>", "从文件读取内容")
+  .option("--format <format>", "内容格式 (lake/html/markdown)", "lake")
   .description("新建文档")
   .action(
     async (
-      namespace: string,
+      bookId: string,
       title: string,
-      options: { body?: string; file?: string }
+      options: { body?: string; file?: string; format?: string }
     ) => {
       try {
-        let body = options.body || "# 新文档";
+        let body = options.body || "";
         if (options.file) {
           const { readFileSync } = await import("node:fs");
           body = readFileSync(options.file, "utf-8");
         }
-        const doc = await api.createDoc(namespace, { title, body });
-        console.log(
-          `文档已创建: ${doc.title} (id: ${doc.id}, slug: ${doc.slug})`
-        );
+        // Wrap in lake format if plain text
+        if (body && !body.startsWith("<") && options.format === "lake") {
+          body = `<p>${body}</p>`;
+        }
+        const doc = await api.createDoc(Number(bookId), {
+          title,
+          body,
+          format: options.format,
+        });
+        console.log(`文档已创建: ${doc.title} (id: ${doc.id}, slug: ${doc.slug})`);
       } catch (err) {
         console.error("创建文档失败:", (err as Error).message);
         process.exit(1);
@@ -197,13 +236,14 @@ program
   .command("update")
   .argument("<id>", "文档 ID")
   .option("-t, --title <title>", "新标题")
-  .option("-b, --body <body>", "新内容 (Markdown)")
+  .option("-b, --body <body>", "新内容")
   .option("-f, --file <path>", "从文件读取内容")
+  .option("--format <format>", "内容格式 (lake/html/markdown)")
   .description("更新文档")
   .action(
     async (
       id: string,
-      options: { title?: string; body?: string; file?: string }
+      options: { title?: string; body?: string; file?: string; format?: string }
     ) => {
       try {
         let body = options.body;
@@ -214,6 +254,7 @@ program
         const data: { title?: string; body?: string; format?: string } = {};
         if (options.title) data.title = options.title;
         if (body) data.body = body;
+        if (options.format) data.format = options.format;
         const doc = await api.updateDoc(Number(id), data);
         console.log(`文档已更新: ${doc.title}`);
       } catch (err) {
