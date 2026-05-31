@@ -1,0 +1,33 @@
+{
+  "name": "yuque-session",
+  "version": "0.1.0",
+  "description": "语雀 CLI + MCP 工具 - 基于 Session Cookie 认证，无需会员",
+  "type": "module",
+  "bin": {
+    "yuque": "./dist/cli/index.js"
+  },
+  "main": "dist/mcp/server.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli/index.js",
+    "login": "node dist/cli/index.js login",
+    "mcp": "node dist/mcp/server.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.0",
+    "commander": "^13.1.0",
+    "puppeteer": "^24.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
