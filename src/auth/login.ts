@@ -18,21 +18,34 @@ async function getLoginFromPage(page: import("puppeteer").Page): Promise<Session
 
   let user: YuqueUser | null = null;
   try {
-    // Try to get user info from the page data
     const userData = await page.evaluate(() => {
-      const el = document.querySelector("script[data-name='currentUser']");
-      if (el) {
-        try { return JSON.parse(el.textContent || "{}"); } catch {}
+      // Method 1: React/Next.js __NEXT_DATA__
+      const nextData = document.getElementById("__NEXT_DATA__");
+      if (nextData) {
+        try {
+          const parsed = JSON.parse(nextData.textContent || "{}");
+          const cu = parsed?.props?.pageProps?.currentUser || parsed?.props?.currentUser;
+          if (cu?.id) return cu;
+        } catch {}
       }
-      const allScripts = document.querySelectorAll("script");
-      for (const s of allScripts) {
+      // Method 2: Look for window.__INITIAL_STATE__ or similar
+      const scripts = document.querySelectorAll("script");
+      for (const s of scripts) {
         const t = s.textContent || "";
-        if (t.includes("currentUser") || t.includes('"login"')) {
-          try {
-            const m = t.match(/currentUser\s*[:=]\s*({[^;]+})/);
-            if (m) return JSON.parse(m[1]);
-          } catch {}
-        }
+        if (!t.includes("currentUser") && !t.includes('"login"')) continue;
+        try {
+          const m = t.match(/currentUser\s*[=:]\s*({.+?})\s*[;,\n]/);
+          if (m) {
+            const parsed = JSON.parse(m[1]);
+            if (parsed?.id) return parsed;
+          }
+        } catch {}
+      }
+      // Method 3: check for data-current-user attribute
+      const body = document.body;
+      const attr = body.getAttribute("data-current-user") || body.getAttribute("data-user");
+      if (attr) {
+        try { return JSON.parse(attr); } catch {}
       }
       return null;
     });
@@ -49,11 +62,13 @@ async function getLoginFromPage(page: import("puppeteer").Page): Promise<Session
 
   if (!user) {
     try {
-      const urlInfo = await page.evaluate(() => {
-        const links = document.querySelectorAll('a[href*="/settings/profile"]');
-        if (links.length > 0) return null;
-        return window.location.hostname;
+      const urlLogin = await page.evaluate(() => {
+        const m = window.location.pathname.match(/^\/([^/]+)/);
+        return m ? m[1] : null;
       });
+      if (urlLogin) {
+        user = { id: 0, name: urlLogin, login: urlLogin, avatar_url: "" };
+      }
     } catch {}
   }
 
@@ -75,40 +90,48 @@ export async function login(): Promise<SessionData> {
   });
 
   try {
-    const page = await browser.newPage();
+    const [page] = await browser.pages();
 
-    console.log("浏览器已打开，请在页面中完成登录（手机号+验证码/扫码均可）...");
-    console.log("登录成功后本工具会自动捕获会话信息。");
+    // Clear any guest cookies that Yuque login page sets automatically
+    await page.deleteCookie();
+
+    console.log("\n浏览器已打开，请在页面中完成登录（手机号+验证码/扫码均可）...");
+    console.log("登录成功后页面会自动跳转，本工具将捕获会话信息。\n");
 
     await page.goto("https://www.yuque.com/login", { waitUntil: "networkidle2" });
 
     const start = Date.now();
     while (Date.now() - start < MAX_WAIT) {
-      const cookies = await page.cookies();
-      const hasSession = cookies.some(
-        (c) => c.name === "_yuque_session" && c.domain.includes("yuque.com") && c.value
-      );
-      if (hasSession) {
-        // Give the page a moment to load user data
-        await new Promise((r) => setTimeout(r, 2000));
-        const sessionData = await getLoginFromPage(page);
-        saveSession(sessionData);
+      try {
+        const currentUrl = page.url();
+        const pathname = new URL(currentUrl).pathname;
 
-        if (sessionData.user) {
-          console.log(
-            `登录成功！用户: ${sessionData.user.name} (@${sessionData.user.login})`
-          );
-        } else {
-          console.log("登录成功！");
+        // Login page itself sets guest cookies.
+        // We detect real login by URL change: after login, Yuque redirects to /dashboard or /.
+        if (!pathname.includes("/login")) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const sessionData = await getLoginFromPage(page);
+          saveSession(sessionData);
+
+          if (sessionData.user) {
+            console.log(
+              `\n登录成功！用户: ${sessionData.user.name} (@${sessionData.user.login})`
+            );
+          } else {
+            console.log("\n登录成功！");
+          }
+          console.log("会话已保存，有效期约 14 天。");
+          return sessionData;
         }
-        console.log("会话已保存，有效期约 14 天。");
-        return sessionData;
+      } catch {
+        // Page might have been closed/navigated
+        break;
       }
       await new Promise((r) => setTimeout(r, POLL_INTERVAL));
     }
 
     throw new Error("登录超时或未检测到登录态，请重试。");
   } finally {
-    await browser.close();
+    try { await browser.close(); } catch {}
   }
 }
