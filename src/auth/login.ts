@@ -62,31 +62,46 @@ async function getLoginFromPage(page: import("puppeteer").Page): Promise<Session
 
   if (!user) {
     try {
-      // Try to find user ID from URL redirect params or fetch from API
+      // User info is often in avatar img alt text (e.g. <img alt="letany" ...>)
       const fromPage = await page.evaluate(() => {
-        // Check if body has inline user data
-        const html = document.body?.innerHTML || "";
-        const m = html.match(/"user"\s*:\s*\{[^}]*"id"\s*:\s*(\d+)[^}]*"login"\s*:\s*"([^"]+)"/);
-        if (m) return { id: Number(m[1]), login: m[2] };
-        // Try data attributes
-        const app = document.getElementById("app") || document.getElementById("root");
-        if (app) {
-          for (const key of Object.keys(app.dataset)) {
-            if (key.includes("user")) {
-              const val = app.dataset[key];
-              if (val) try { return JSON.parse(val); } catch {}
-            }
+        // Method 1: img alt text (avatar image)
+        const imgs = document.querySelectorAll<HTMLImageElement>("img[alt]");
+        for (const img of imgs) {
+          const alt = img.alt.trim();
+          if (alt && alt.length < 30 && alt !== "语雀" && alt !== "avatar" && alt !== "logo") {
+            return { name: alt, login: alt };
           }
+        }
+        // Method 2: window.__INITIAL_STATE__ or __NEXT_DATA__
+        const nextData = document.getElementById("__NEXT_DATA__");
+        if (nextData?.textContent) {
+          try {
+            const parsed = JSON.parse(nextData.textContent);
+            const cu = parsed?.props?.pageProps?.currentUser || parsed?.props?.currentUser;
+            if (cu?.login) return { id: cu.id, name: cu.name, login: cu.login, avatar: cu.avatar_url };
+          } catch {}
+        }
+        // Method 3: inline script with user data
+        const scripts = document.querySelectorAll("script");
+        for (const s of scripts) {
+          const t = s.textContent || "";
+          const m = t.match(/"login"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)"/);
+          if (m) return { id: 0, name: m[2], login: m[1] };
+        }
+        // Method 4: current URL path
+        const path = window.location.pathname;
+        const pathParts = path.split("/").filter(Boolean);
+        if (pathParts.length > 0 && pathParts[0] !== "dashboard" && pathParts[0] !== "login") {
+          return { name: pathParts[0], login: pathParts[0] };
         }
         return null;
       });
-      if (fromPage?.id && fromPage.id > 0) {
-        const login = fromPage.login ?? "";
+      if (fromPage) {
         user = {
-          id: fromPage.id,
-          name: login,
-          login: login,
-          avatar_url: "",
+          id: (fromPage as Record<string, unknown>).id as number || 0,
+          name: (fromPage as Record<string, unknown>).name as string || (fromPage as Record<string, unknown>).login as string || "",
+          login: (fromPage as Record<string, unknown>).login as string || "",
+          avatar_url: (fromPage as Record<string, unknown>).avatar as string || "",
         };
       }
     } catch {}
