@@ -62,12 +62,32 @@ async function getLoginFromPage(page: import("puppeteer").Page): Promise<Session
 
   if (!user) {
     try {
-      const urlLogin = await page.evaluate(() => {
-        const m = window.location.pathname.match(/^\/([^/]+)/);
-        return m ? m[1] : null;
+      // Try to find user ID from URL redirect params or fetch from API
+      const fromPage = await page.evaluate(() => {
+        // Check if body has inline user data
+        const html = document.body?.innerHTML || "";
+        const m = html.match(/"user"\s*:\s*\{[^}]*"id"\s*:\s*(\d+)[^}]*"login"\s*:\s*"([^"]+)"/);
+        if (m) return { id: Number(m[1]), login: m[2] };
+        // Try data attributes
+        const app = document.getElementById("app") || document.getElementById("root");
+        if (app) {
+          for (const key of Object.keys(app.dataset)) {
+            if (key.includes("user")) {
+              const val = app.dataset[key];
+              if (val) try { return JSON.parse(val); } catch {}
+            }
+          }
+        }
+        return null;
       });
-      if (urlLogin) {
-        user = { id: 0, name: urlLogin, login: urlLogin, avatar_url: "" };
+      if (fromPage?.id && fromPage.id > 0) {
+        const login = fromPage.login ?? "";
+        user = {
+          id: fromPage.id,
+          name: login,
+          login: login,
+          avatar_url: "",
+        };
       }
     } catch {}
   }
