@@ -84,13 +84,25 @@ async function getLoginFromPage(page: import("puppeteer").Page): Promise<Session
 }
 
 export async function login(): Promise<SessionData> {
+  const systemChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  const hasChrome = await import("node:fs").then((fs) => fs.existsSync(systemChrome)).catch(() => false);
+
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: { width: 1280, height: 800 },
+    ...(hasChrome ? {
+      executablePath: systemChrome,
+      args: ["--disable-blink-features=AutomationControlled"],
+    } : {}),
   });
 
   try {
     const [page] = await browser.pages();
+
+    // Hide automation detection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
 
     // Clear any guest cookies that Yuque login page sets automatically
     await page.deleteCookie();
